@@ -166,7 +166,8 @@ final class NettyHttpServer {
             return failed(newH1ConfigException());
         }
         return showPipeline(DefaultNettyConnection.initChannel(channel,
-                httpExecutionContext.bufferAllocator(), httpExecutionContext.executor(), LAST_CHUNK_PREDICATE,
+                httpExecutionContext.bufferAllocator(), httpExecutionContext.executor(),
+                httpExecutionContext.ioExecutor(), LAST_CHUNK_PREDICATE,
                 closeHandler, config.tcpConfig().flushStrategy(), config.tcpConfig().idleTimeoutMs(),
                 initializer.andThen(getChannelInitializer(getByteBufAllocator(httpExecutionContext.bufferAllocator()),
                         h1Config, closeHandler)), httpExecutionContext.executionStrategy(), HTTP_1_1, observer, false)
@@ -344,7 +345,13 @@ final class NettyHttpServer {
 
                 final HttpRequestMethod requestMethod = request.method();
                 final HttpKeepAlive keepAlive = HttpKeepAlive.responseKeepAlive(request);
-                Publisher<Object> responsePublisher = service.handle(this, request, streamingResponseFactory())
+                Single<StreamingHttpResponse> respSingle;
+                try {
+                    respSingle = service.handle(this, request, streamingResponseFactory());
+                } catch (Throwable cause) {
+                    respSingle = failed(cause);
+                }
+                Publisher<Object> respPublisher = respSingle
                         .onErrorReturn(cause -> newErrorResponse(cause, executionContext.executor(),
                                 request.version(), keepAlive))
                         .flatMapPublisher(response -> {
@@ -359,7 +366,7 @@ final class NettyHttpServer {
                         });
 
                 if (drainRequestPayloadBody) {
-                    responsePublisher = responsePublisher.concat(defer(() -> payloadSubscribed.get() ?
+                    respPublisher = respPublisher.concat(defer(() -> payloadSubscribed.get() ?
                                     completed() : request.messageBody().ignoreElements()
                             // Discarding the request payload body is an operation which should not impact the state of
                             // request/response processing. It's appropriate to recover from any error here.
@@ -367,7 +374,7 @@ final class NettyHttpServer {
                             .onErrorComplete()));
                 }
 
-                return responsePublisher.concat(requestCompletion);
+                return respPublisher.concat(requestCompletion);
             });
             return connection.write(handleMultipleRequests ? responseObjectPublisher.repeat(val -> true) :
                     responseObjectPublisher);
